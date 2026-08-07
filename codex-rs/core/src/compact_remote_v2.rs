@@ -345,6 +345,7 @@ async fn run_remote_compaction_request_v2(
         .stream_max_retries()
         .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
     let mut retries = 0;
+    let retry_cancellation = CancellationToken::new();
     loop {
         let result = match client_session
             .stream(
@@ -375,6 +376,7 @@ async fn run_remote_compaction_request_v2(
                     sess,
                     turn_context,
                     ResponsesStreamRequest::RemoteCompactionV2,
+                    &retry_cancellation,
                 )
                 .await?;
             }
