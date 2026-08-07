@@ -45,6 +45,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::models::WebSearchAction;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RolloutItem;
@@ -83,6 +84,7 @@ use serde_json::json;
 use std::io::Write;
 use std::num::NonZeroU64;
 use std::sync::Arc;
+use std::time::Duration;
 use tempfile::TempDir;
 use uuid::Uuid;
 use wiremock::Mock;
@@ -3630,6 +3632,94 @@ async fn incomplete_response_emits_content_filter_error_message() -> anyhow::Res
     assert_eq!(responses_mock.requests().len(), 1);
 
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_overload_retries_on_the_same_turn() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = MockServer::start().await;
+    let responses_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse_failed(
+                "resp_overloaded_1",
+                "server_is_overloaded",
+                "selected model is at capacity",
+            ),
+            sse_failed(
+                "resp_overloaded_2",
+                "server_is_overloaded",
+                "selected model is at capacity",
+            ),
+            sse_failed(
+                "resp_overloaded_3",
+                "server_is_overloaded",
+                "selected model is at capacity",
+            ),
+            sse(vec![
+                ev_response_created("resp_retried"),
+                ev_completed("resp_retried"),
+            ]),
+        ],
+    )
+    .await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+    tokio::time::pause();
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "keep working".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+
+    let mut retry_messages = Vec::new();
+    for _ in 0..3 {
+        loop {
+            match test.codex.next_event().await?.msg {
+                EventMsg::StreamError(event)
+                    if event.codex_error_info == Some(CodexErrorInfo::ServerOverloaded) =>
+                {
+                    retry_messages.push(event.message);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        tokio::time::advance(Duration::from_secs(360)).await;
+    }
+    loop {
+        if matches!(
+            test.codex.next_event().await?.msg,
+            EventMsg::TurnComplete(_)
+        ) {
+            break;
+        }
+    }
+
+    assert_eq!(
+        retry_messages,
+        vec![
+            "Reconnecting... 1/3",
+            "Reconnecting... 2/3",
+            "Reconnecting... 3/3",
+        ]
+    );
+    let requests = responses_mock.requests();
+    assert_eq!(requests.len(), 4);
+    let turn_id = requests[0].body_json()["client_metadata"]["turn_id"].clone();
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.body_json()["client_metadata"]["turn_id"] == turn_id)
+    );
+
     Ok(())
 }
 
