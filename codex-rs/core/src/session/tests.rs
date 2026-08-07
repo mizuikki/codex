@@ -5827,7 +5827,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         executed_tool_calls,
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
             Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
-            &config.features,
+            &config.code_mode,
         ),
         tool_search_handler_cache: Default::default(),
         turn_environments: Arc::clone(&turn_environments),
@@ -8046,7 +8046,7 @@ where
         executed_tool_calls,
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
             Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
-            &config.features,
+            &config.code_mode,
         ),
         tool_search_handler_cache: Default::default(),
         turn_environments: Arc::clone(&turn_environments),
@@ -9299,10 +9299,7 @@ async fn build_initial_context_adds_multi_agent_v2_subagent_usage_hint_as_develo
         Arc::get_mut(&mut turn_context).expect("thread settings should not be shared");
     turn_context_mut.session_source = session_source;
     let config = Arc::make_mut(&mut turn_context_mut.config);
-    config.token_budget = Some(crate::config::TokenBudgetConfig {
-        mode: codex_features::TokenBudgetMode::Name,
-        ..crate::config::TokenBudgetConfig::default()
-    });
+    config.token_budget = Some(crate::config::TokenBudgetConfig::default());
     config
         .features
         .enable(Feature::TokenBudget)
