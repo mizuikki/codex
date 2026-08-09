@@ -162,8 +162,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          archive="codex-rs/dist/codex-${VERSION}-${TARGET}.tar.gz"
+          archive="dist/codex-${VERSION}-${TARGET}.tar.gz"
           release_tag="fork-v${VERSION}"
+
+          if [[ ! -f "$archive" ]]; then
+            echo "Release archive not found: $archive" >&2
+            exit 1
+          fi
 
           if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$release_tag" \
