@@ -9,7 +9,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -154,3 +154,31 @@ jobs:
           path: codex-rs/dist/*.tar.gz
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="codex-rs/dist/codex-${VERSION}-${TARGET}.tar.gz"
+          release_tag="fork-v${VERSION}"
+
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$release_tag" \
+              "$archive" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create "$release_tag" \
+              "$archive" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Codex ${VERSION} (fork build)" \
+              --notes "Manual fork build from ${GITHUB_SHA}."
+          fi
+
+          gh release view "$release_tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json url,isDraft,isPrerelease,tagName
