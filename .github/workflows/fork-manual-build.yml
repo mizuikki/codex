@@ -1,0 +1,156 @@
+name: fork-manual-build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version reported by the generated Codex binaries (SemVer)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-linux-x86_64:
+    name: Build Linux x86_64 - ${{ inputs.version }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      TARGET: x86_64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Validate requested version
+        env:
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          semver_re='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$'
+          if [[ ! "$VERSION" =~ $semver_re ]]; then
+            echo "Invalid version: $VERSION" >&2
+            echo "Expected SemVer such as 0.148.0 or 0.148.0-fork.1" >&2
+            exit 1
+          fi
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            binutils \
+            libcap-dev \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ env.TARGET }}
+
+      - name: Configure binary version
+        env:
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version_core="${VERSION%%[-+]*}"
+          IFS=. read -r version_major version_minor version_patch <<<"$version_core"
+          version_without_build="${VERSION%%+*}"
+          version_pre=""
+          if [[ "$version_without_build" == *-* ]]; then
+            version_pre="${version_without_build#*-}"
+          fi
+
+          wrapper="${RUNNER_TEMP}/codex-version-rustc-wrapper"
+          cat >"$wrapper" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          rustc="$1"
+          shift
+          export CARGO_PKG_VERSION="$CODEX_BUILD_VERSION"
+          export CARGO_PKG_VERSION_MAJOR="$CODEX_BUILD_VERSION_MAJOR"
+          export CARGO_PKG_VERSION_MINOR="$CODEX_BUILD_VERSION_MINOR"
+          export CARGO_PKG_VERSION_PATCH="$CODEX_BUILD_VERSION_PATCH"
+          export CARGO_PKG_VERSION_PRE="$CODEX_BUILD_VERSION_PRE"
+          exec "$rustc" "$@"
+          EOF
+          chmod 0755 "$wrapper"
+
+          {
+            echo "CODEX_BUILD_VERSION=$VERSION"
+            echo "CODEX_BUILD_VERSION_MAJOR=$version_major"
+            echo "CODEX_BUILD_VERSION_MINOR=$version_minor"
+            echo "CODEX_BUILD_VERSION_PATCH=$version_patch"
+            echo "CODEX_BUILD_VERSION_PRE=$version_pre"
+            echo "RUSTC_WORKSPACE_WRAPPER=$wrapper"
+          } >>"$GITHUB_ENV"
+
+      - name: Build Codex and code mode host
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build \
+            --locked \
+            --target "$TARGET" \
+            --release \
+            --timings \
+            --bin codex \
+            --bin codex-code-mode-host
+
+      - name: Verify binaries
+        env:
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="target/${TARGET}/release"
+          actual_version="$("${release_dir}/codex" --version)"
+          if [[ "$actual_version" != "codex-cli $VERSION" ]]; then
+            echo "Unexpected Codex version: $actual_version" >&2
+            exit 1
+          fi
+          "${release_dir}/codex-code-mode-host" --help >/dev/null
+
+      - name: Create archive
+        env:
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="target/${TARGET}/release"
+          package_dir="dist/codex-${VERSION}-${TARGET}"
+          mkdir -p "$package_dir"
+          install -m 0755 "${release_dir}/codex" "$package_dir/codex"
+          install -m 0755 \
+            "${release_dir}/codex-code-mode-host" \
+            "$package_dir/codex-code-mode-host"
+          (
+            cd "$package_dir"
+            sha256sum codex codex-code-mode-host >SHA256SUMS
+          )
+          tar -C dist -czf "${package_dir}.tar.gz" "$(basename "$package_dir")"
+
+      - name: Upload build archive
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-${{ inputs.version }}-${{ env.TARGET }}
+          path: codex-rs/dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
